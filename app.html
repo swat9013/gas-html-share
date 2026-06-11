@@ -1,0 +1,293 @@
+<script>
+(function () {
+  var BOOT = window.__BOOT__ || { tree: [], isOwner: false, url: '' };
+  var tree = BOOT.tree;          // [{id,name,isRoot,files:[{id,name}]}]
+  var isOwner = BOOT.isOwner;
+  var baseUrl = BOOT.url;
+  var selectedId = tree.length ? tree[0].id : null;
+
+  var sidebarEl = document.getElementById('sidebar');
+  var filelistEl = document.getElementById('filelist');
+  var toastEl = document.getElementById('toast');
+
+  /* ---------- google.script.run を Promise 化 ---------- */
+  function run(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    return new Promise(function (resolve, reject) {
+      google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn].apply(null, args);
+    });
+  }
+
+  /* ---------- ユーティリティ ---------- */
+  function toast(msg, isError) {
+    toastEl.textContent = msg;
+    toastEl.className = 'toast show' + (isError ? ' error' : '');
+    setTimeout(function () { toastEl.className = 'toast'; }, 2600);
+  }
+  function fail(err) {
+    toast(String(err && err.message ? err.message : err) || 'エラーが発生しました', true);
+  }
+  function group(id) { return tree.filter(function (g) { return g.id === id; })[0]; }
+  function selected() { return group(selectedId) || tree[0]; }
+  function sortFiles(g) {
+    g.files.sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'ja'); });
+  }
+  function htmlFilesFrom(dt) {
+    return Array.prototype.slice.call((dt && dt.files) || []).filter(function (f) {
+      return /\.html?$/i.test(f.name);
+    });
+  }
+  function readText(file) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onload = function () { res(r.result); };
+      r.onerror = function () { rej(r.error); };
+      r.readAsText(file);
+    });
+  }
+
+  /* ---------- 描画 ---------- */
+  function render() { renderSidebar(); renderFiles(); }
+
+  function renderSidebar() {
+    sidebarEl.innerHTML = '';
+    tree.forEach(function (g) {
+      var el = document.createElement('div');
+      el.className = 'folder' + (g.id === selectedId ? ' active' : '');
+      el.dataset.id = g.id;
+
+      var icon = document.createElement('span');
+      icon.className = 'ficon';
+      icon.textContent = g.isRoot ? '🗂' : '📁';
+      var name = document.createElement('span');
+      name.className = 'fname';
+      name.textContent = g.name;
+      el.appendChild(icon);
+      el.appendChild(name);
+
+      if (isOwner && !g.isRoot) {
+        var act = document.createElement('span');
+        act.className = 'row-act';
+        act.appendChild(iconBtn('✎', '名前を変更', function (e) { e.stopPropagation(); onRenameFolder(g); }));
+        act.appendChild(iconBtn('✕', '削除', function (e) { e.stopPropagation(); onDeleteFolder(g); }));
+        el.appendChild(act);
+      }
+
+      el.addEventListener('click', function () { selectedId = g.id; render(); });
+
+      if (isOwner) {
+        enableFolderDrop(el, g.id);
+      }
+      sidebarEl.appendChild(el);
+    });
+  }
+
+  function renderFiles() {
+    var g = selected();
+    filelistEl.innerHTML = '';
+    if (!g) {
+      filelistEl.innerHTML = '<p class="empty">フォルダがありません。</p>';
+      return;
+    }
+    var h2 = document.createElement('h2');
+    h2.textContent = (g.isRoot ? '🗂 ' : '📁 ') + g.name + '（' + g.files.length + '）';
+    filelistEl.appendChild(h2);
+
+    if (isOwner) {
+      var dz = document.createElement('div');
+      dz.className = 'dropzone';
+      dz.textContent = '⬆ ここに .html をドラッグ＆ドロップで「' + g.name + '」へ追加';
+      enableAddDrop(dz, g.id);
+      filelistEl.appendChild(dz);
+    }
+
+    if (!g.files.length) {
+      var empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = 'まだ HTML がありません。';
+      filelistEl.appendChild(empty);
+      return;
+    }
+
+    var ul = document.createElement('ul');
+    ul.className = 'files';
+    g.files.forEach(function (f) {
+      var li = document.createElement('li');
+      li.dataset.id = f.id;
+
+      var link = document.createElement('a');
+      link.className = 'fname';
+      link.href = baseUrl + '?id=' + encodeURIComponent(f.id);
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = f.name;
+      li.appendChild(link);
+
+      if (isOwner) {
+        var act = document.createElement('span');
+        act.className = 'row-act';
+        act.appendChild(iconBtn('✎', '名前を変更', function () { onRenameFile(g, f); }));
+        act.appendChild(iconBtn('⤵', 'フォルダ移動', function () { onMoveFile(g, f); }));
+        act.appendChild(iconBtn('✕', '削除', function () { onDeleteFile(g, f); }));
+        li.appendChild(act);
+        enableUpdateDrop(li, f);
+      }
+      ul.appendChild(li);
+    });
+    filelistEl.appendChild(ul);
+  }
+
+  function iconBtn(label, title, handler) {
+    var b = document.createElement('button');
+    b.className = 'icon-btn';
+    b.type = 'button';
+    b.title = title;
+    b.textContent = label;
+    b.addEventListener('click', handler);
+    return b;
+  }
+
+  /* ---------- D&D 配線 ---------- */
+  function onDragEnter(el) { el.classList.add('dragover'); }
+  function onDragLeave(el) { el.classList.remove('dragover'); }
+
+  function enableFolderDrop(el, folderId) {
+    el.addEventListener('dragover', function (e) { e.preventDefault(); onDragEnter(el); });
+    el.addEventListener('dragleave', function () { onDragLeave(el); });
+    el.addEventListener('drop', function (e) {
+      e.preventDefault(); e.stopPropagation(); onDragLeave(el);
+      addFiles(folderId, htmlFilesFrom(e.dataTransfer));
+    });
+  }
+  function enableAddDrop(el, folderId) {
+    el.addEventListener('dragover', function (e) { e.preventDefault(); onDragEnter(el); });
+    el.addEventListener('dragleave', function () { onDragLeave(el); });
+    el.addEventListener('drop', function (e) {
+      e.preventDefault(); e.stopPropagation(); onDragLeave(el);
+      addFiles(folderId, htmlFilesFrom(e.dataTransfer));
+    });
+  }
+  function enableUpdateDrop(el, file) {
+    el.addEventListener('dragover', function (e) { e.preventDefault(); onDragEnter(el); });
+    el.addEventListener('dragleave', function () { onDragLeave(el); });
+    el.addEventListener('drop', function (e) {
+      e.preventDefault(); e.stopPropagation(); onDragLeave(el);
+      var dropped = htmlFilesFrom(e.dataTransfer);
+      if (!dropped.length) { toast('HTML ファイルではありません', true); return; }
+      updateRow(file, dropped[0]);
+    });
+  }
+
+  /* ---------- 操作 ---------- */
+  function addFiles(folderId, files) {
+    if (!files.length) { toast('HTML ファイルではありません', true); return; }
+    var g = group(folderId);
+    var chain = Promise.resolve();
+    files.forEach(function (file) {
+      chain = chain.then(function () {
+        return readText(file).then(function (html) {
+          return run('uploadFile', folderId, file.name, html);
+        }).then(function (meta) {
+          g.files.push({ id: meta.id, name: meta.name });
+        });
+      });
+    });
+    chain.then(function () {
+      sortFiles(g); selectedId = folderId; render();
+      toast(files.length + ' 件を追加しました');
+    }).catch(fail);
+  }
+
+  function updateRow(file, dropped) {
+    if (!confirm('「' + file.name + '」の中身を差し替えます。\nid と共有 URL は変わりません。よろしいですか？')) return;
+    readText(dropped).then(function (html) {
+      return run('updateFile', file.id, html);
+    }).then(function () {
+      toast('アップデートしました');
+    }).catch(fail);
+  }
+
+  function onRenameFile(g, f) {
+    var name = prompt('新しいファイル名', f.name);
+    if (name === null || !name.trim()) return;
+    run('renameFile', f.id, name).then(function (meta) {
+      f.name = meta.name; sortFiles(g); render(); toast('名前を変更しました');
+    }).catch(fail);
+  }
+
+  function onMoveFile(g, f) {
+    var targets = tree.filter(function (t) { return t.id !== g.id; });
+    if (!targets.length) { toast('移動先フォルダがありません', true); return; }
+    var msg = '移動先の番号を入力:\n' + targets.map(function (t, i) { return (i + 1) + ': ' + t.name; }).join('\n');
+    var ans = prompt(msg, '1');
+    if (ans === null) return;
+    var idx = parseInt(ans, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= targets.length) { toast('無効な番号です', true); return; }
+    var dest = targets[idx];
+    run('moveFile', f.id, dest.id).then(function () {
+      g.files = g.files.filter(function (x) { return x.id !== f.id; });
+      dest.files.push({ id: f.id, name: f.name }); sortFiles(dest);
+      render(); toast('「' + dest.name + '」へ移動しました');
+    }).catch(fail);
+  }
+
+  function onDeleteFile(g, f) {
+    if (!confirm('「' + f.name + '」をゴミ箱へ移動します。よろしいですか？')) return;
+    run('deleteFile', f.id).then(function () {
+      g.files = g.files.filter(function (x) { return x.id !== f.id; });
+      render(); toast('削除しました');
+    }).catch(fail);
+  }
+
+  function onRenameFolder(g) {
+    var name = prompt('新しいフォルダ名', g.name);
+    if (name === null || !name.trim()) return;
+    run('renameFolder', g.id, name).then(function () {
+      g.name = name.trim();
+      tree.sort(folderSort); render(); toast('フォルダ名を変更しました');
+    }).catch(fail);
+  }
+
+  function onDeleteFolder(g) {
+    var n = g.files.length;
+    if (!confirm('フォルダ「' + g.name + '」を中身（HTML ' + n + ' 件）ごとゴミ箱へ移動します。\nこの操作は配布済み共有 URL を無効化します。よろしいですか？')) return;
+    run('deleteFolder', g.id).then(function () {
+      tree = tree.filter(function (t) { return t.id !== g.id; });
+      selectedId = tree.length ? tree[0].id : null;
+      render(); toast('フォルダを削除しました');
+    }).catch(fail);
+  }
+
+  function folderSort(a, b) {
+    if (a.isRoot) return -1;
+    if (b.isRoot) return 1;
+    return String(a.name).localeCompare(String(b.name), 'ja');
+  }
+
+  /* ---------- ヘッダボタン ---------- */
+  var btnNewFolder = document.getElementById('btn-new-folder');
+  if (btnNewFolder && isOwner) {
+    btnNewFolder.addEventListener('click', function () {
+      var name = prompt('新しいフォルダ名');
+      if (name === null || !name.trim()) return;
+      run('createFolder', name).then(function (meta) {
+        tree.push({ id: meta.id, name: meta.name, isRoot: false, files: [] });
+        tree.sort(folderSort); selectedId = meta.id; render(); toast('フォルダを作成しました');
+      }).catch(fail);
+    });
+  }
+  var btnRefresh = document.getElementById('btn-refresh');
+  if (btnRefresh) {
+    btnRefresh.addEventListener('click', function () {
+      run('getTree').then(function (fresh) {
+        tree = fresh;
+        if (!group(selectedId)) selectedId = tree.length ? tree[0].id : null;
+        render(); toast('最新の状態に更新しました');
+      }).catch(fail);
+    });
+  }
+
+  /* ---------- 初期描画 ---------- */
+  render();
+})();
+</script>

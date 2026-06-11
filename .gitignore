@@ -1,0 +1,3 @@
+# clasp のローカル認証情報・プロジェクト紐付け（machine 固有）
+.clasp.json
+.clasprc.json

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <base target="_top">
+  <title>HTML 管理</title>
+  <?!= include('styles'); ?>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <h1>📂 HTML 管理</h1>
+      <div class="actions">
+        <a class="btn" href="<?= folderUrl ?>" target="_blank" rel="noopener">📁 Drive を開く</a>
+        <button class="btn" id="btn-refresh" type="button">🔄 更新</button>
+        <? if (isOwner) { ?>
+          <button class="btn btn-primary" id="btn-new-folder" type="button">＋ フォルダ作成</button>
+        <? } ?>
+      </div>
+    </header>
+
+    <? if (!configured) { ?>
+      <div class="banner warn">スクリプトプロパティ <code>FOLDER_ID</code> が未設定です。</div>
+    <? } ?>
+    <? if (listError) { ?>
+      <div class="banner warn">一覧の取得でエラーが発生しました: <?= listError ?></div>
+    <? } ?>
+
+    <main class="panes">
+      <nav class="sidebar" id="sidebar"></nav>
+      <section class="filelist" id="filelist"></section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    window.__BOOT__ = <?!= boot ?>;
+  </script>
+  <?!= include('app'); ?>
+</body>
+</html>
